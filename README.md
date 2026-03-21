@@ -6,10 +6,8 @@ It can read, write, and execute code in your projects while running offline in a
 
 ## Installation
 
-You can install it globally directly from GitHub. Using `pipx` is recommended for terminal applications, but `pip` works too.
-
 ```bash
-pipx install git+https://github.com/rx76d/prisl-code.git
+pip install git+https://github.com/rx76d/prisl-code.git
 ```
 
 ## Usage
