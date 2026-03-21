@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""
+Local Agentic CLI - Prisl Code
+---------------------------------------
+A highly robust, autonomous terminal assistant using local LLMs.
+Features:
+- @filename context injection with TAB auto-complete
+- Slash commands (/help, /compact, /clear, /history, /save, /exit) with auto-complete
+- Up/Down arrow message history
+- Streaming Markdown rendering
+- Interactive Tool Execution (Accept/Reject changes)
+- Unified Diffs for file modifications
+- Shell command execution
+- Directory traversal & File grepping
+- Conversation memory & system directives
+- Self-Healing Tool Error Recovery
+- Developed by rx76d
+"""
+
+import os
+import sys
+import subprocess
+import platform
+import venv
+import json
+import difflib
+import fnmatch
+import re
+import datetime
+import urllib.request
+import shutil
+import time
+import zipfile
+from typing import Dict, Any, Tuple
+
+# ==========================================
+# VIRTUAL ENVIRONMENT BOOTSTRAP
+# ==========================================
+
+def bootstrap_venv():
+    """Ensures the script runs inside an isolated virtual environment with all dependencies."""
+    # Use the user's home directory so we don't get permission errors when installed globally
+    home_dir = os.path.expanduser("~")
+    venv_dir = os.path.join(home_dir, ".prisl_code", "env")
+    
+    if platform.system() == "Windows":
+        venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
+        venv_pip = os.path.join(venv_dir, "Scripts", "pip.exe")
+    else:
+        venv_python = os.path.join(venv_dir, "bin", "python")
+        venv_pip = os.path.join(venv_dir, "bin", "pip")
+
+    if os.path.normcase(sys.executable) == os.path.normcase(venv_python):
+        return
+
+    print("\n[Bootstrapper] Checking isolated environment...")
+    
+    if not os.path.exists(venv_python):
+        print("\n[Bootstrapper] First run detected. Creating an isolated environment...")
+        
+        if os.path.exists(venv_dir):
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            
+        os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
+            
+        try:
+            venv.create(venv_dir, with_pip=True)
+            
+            print("[Bootstrapper] Installing required dependencies...")
+            deps = ["openai", "rich", "prompt_toolkit", "psutil"]
+            
+            subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "-q"])
+            
+            result = subprocess.run([venv_pip, "install"] + deps)
+            
+            if result.returncode != 0:
+                print("[Bootstrapper] ERROR: Failed to install dependencies.")
+                shutil.rmtree(venv_dir, ignore_errors=True)
+                sys.exit(1)
+                
+            print("[Bootstrapper] Dependencies installed successfully.")
+            
+        except BaseException as e:
+            print(f"\n[Bootstrapper] Process interrupted or failed ({type(e).__name__}). Cleaning up corrupted environment...")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            sys.exit(1)
+
+    print("[Bootstrapper] Relaunching inside virtual environment...\n")
+    
+    sys.exit(subprocess.call([venv_python, __file__] + sys.argv[1:]))
+
+bootstrap_venv()
+
+try:
+    from openai import OpenAI
+except ImportError:
+    print("ERROR: The 'openai' library is missing.")
+    print("Please run: pip install openai")
+    sys.exit(1)
+
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+    from rich.prompt import Confirm
+    from rich.live import Live
+    from rich.text import Text
+    from rich.table import Table
+except ImportError:
+    print("ERROR: The 'rich' library is missing.")
+    print("Please run: pip install rich")
+    sys.exit(1)
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion, PathCompleter
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.styles import Style
+except ImportError:
+    print("ERROR: The 'prompt_toolkit' library is missing.")
+    print("Please run: pip install prompt_toolkit")
+    sys.exit(1)
+
+try:
+    import psutil
+except ImportError:
+    print("ERROR: The 'psutil' library is missing.")
+    print("Please run: pip install psutil")
+    sys.exit(1)
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except ImportError:
+    print("ERROR: The 'tkinter' library is missing.")
+    print("On Linux, you can install it with: sudo apt install python3-tk")
+    sys.exit(1)
+
+
+# ==========================================
+# CONFIGURATION & INITIALIZATION
+# ==========================================
+
+console = Console()
+
+# ==========================================
+# SERVER MANAGEMENT LOGIC
+# ==========================================
+
+class LocalServerManager:
+    """Manages the lifecycle of llama-server and RAM validation."""
+    
+    @staticmethod
+    def is_server_running(port: int) -> bool:
+        """Checks if an OpenAI-compatible /v1/models endpoint is active."""
+        try:
+            url = f"http://127.0.0.1:{port}/v1/models"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=1.0) as response:
+                return response.status == 200
+        except Exception:
+            return False
+
+    @staticmethod
+    def select_gguf_model() -> str:
+        """Opens a native file picker for the user to select a GGUF model."""
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        
+        file_path = filedialog.askopenfilename(
+            title="Select a GGUF Model to Run",
+            filetypes=[("GGUF Models", "*.gguf"), ("All files", "*.*")]
+        )
+        root.destroy()
+        return file_path
+
+    @staticmethod
+    def check_ram_for_model(gguf_path: str) -> bool:
+        """Checks if there is enough free RAM to run the model."""
+        try:
+            file_size_bytes = os.path.getsize(gguf_path)
+            required_ram_bytes = file_size_bytes * 1.2
+            available_ram_bytes = psutil.virtual_memory().available
+            
+            file_size_gb = file_size_bytes / (1024**3)
+            req_ram_gb = required_ram_bytes / (1024**3)
+            avail_ram_gb = available_ram_bytes / (1024**3)
+            
+            if required_ram_bytes > available_ram_bytes:
+                console.print(f"\n[bold red]❌ INSUFFICIENT RAM DETECTED[/bold red]")
+                console.print(f"[red]Model file size: {file_size_gb:.2f} GB[/red]")
+                console.print(f"[red]Estimated RAM required (with context): {req_ram_gb:.2f} GB[/red]")
+                console.print(f"[bold red]Your available free RAM: {avail_ram_gb:.2f} GB[/bold red]")
+                console.print("[yellow]Please close some applications or select a smaller model quantization.[/yellow]")
+                return False
+                
+            console.print(f"[green]✅ RAM check passed! (Model: {file_size_gb:.2f} GB, Free RAM: {avail_ram_gb:.2f} GB)[/green]")
+            return True
+        except Exception as e:
+            console.print(f"[yellow]Could not verify RAM: {e}[/yellow]")
+            return True
+
+    @staticmethod
+    def download_llama_server() -> str:
+        """Downloads the latest pre-compiled llama-server from GitHub based on OS."""
+        sys_os = platform.system().lower()
+        arch = platform.machine().lower()
+        
+        if sys_os == "windows":
+            asset_keyword = "win-avx2-x64"
+            ext = ".zip"
+            exe_name = "llama-server.exe"
+        elif sys_os == "darwin":
+            asset_keyword = "macos-arm64" if arch in ["arm64", "aarch64"] else "macos-x64"
+            ext = ".zip"
+            exe_name = "llama-server"
+        elif sys_os == "linux":
+            asset_keyword = "ubuntu-x64"
+            ext = ".zip"
+            exe_name = "llama-server"
+        else:
+            console.print(f"[red]Unsupported OS for auto-download: {sys_os}[/red]")
+            return ""
+
+        with console.status("[cyan]Fetching latest llama.cpp releases from GitHub...[/cyan]"):
+            try:
+                req = urllib.request.Request("https://api.github.com/repos/ggerganov/llama.cpp/releases/latest")
+                with urllib.request.urlopen(req) as response:
+                    data = json.loads(response.read().decode())
+                
+                download_url = None
+                for asset in data.get("assets", []):
+                    name = asset["name"]
+                    if asset_keyword in name and name.endswith(ext):
+                        download_url = asset["browser_download_url"]
+                        break
+                        
+                if not download_url:
+                    console.print("[red]Could not find a matching pre-compiled binary for your system.[/red]")
+                    return ""
+                    
+                bin_dir = os.path.join(os.getcwd(), "llama_bin")
+                os.makedirs(bin_dir, exist_ok=True)
+                zip_path = os.path.join(bin_dir, "llama_download" + ext)
+                
+                console.print(f"[cyan]Downloading llama-server (~20-50MB)...[/cyan]")
+                urllib.request.urlretrieve(download_url, zip_path)
+                
+                console.print("[cyan]Extracting binaries...[/cyan]")
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(bin_dir)
+                    
+                os.remove(zip_path)
+                
+                server_path = ""
+                for root, _, files in os.walk(bin_dir):
+                    if exe_name in files:
+                        server_path = os.path.join(root, exe_name)
+                        break
+                
+                if not server_path:
+                    console.print("[red]Extraction completed but executable not found.[/red]")
+                    return ""
+
+                if sys_os != "windows":
+                    os.chmod(server_path, 0o755)
+                    
+                console.print("[green]✅ Successfully installed llama-server![/green]")
+                return server_path
+                
+            except Exception as e:
+                console.print(f"[red]Error downloading llama-server: {e}[/red]")
+                return ""
+
+    @staticmethod
+    def ensure_server() -> int:
+        """Ensures a server is running, returning the active port."""
+        if LocalServerManager.is_server_running(8080):
+            return 8080
+        if LocalServerManager.is_server_running(11434):
+            return 11434
+            
+        console.print("[yellow]No local LLM server detected running on port 8080 or 11434.[/yellow]")
+        
+        server_path = shutil.which("llama-server")
+        
+        if not server_path:
+            exe_name = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+            local_bin = os.path.join(os.getcwd(), "llama_bin")
+            if os.path.exists(local_bin):
+                for root, _, files in os.walk(local_bin):
+                    if exe_name in files:
+                        server_path = os.path.join(root, exe_name)
+                        break
+
+        if not server_path:
+            ans = Confirm.ask("Would you like to auto-download 'llama-server' (llama.cpp) to run local models?", default=True)
+            if ans:
+                server_path = LocalServerManager.download_llama_server()
+            if not server_path:
+                console.print("[bold red]❌ Could not find or install llama-server. Please install it manually.[/bold red]")
+                sys.exit(1)
+
+        console.print("[cyan]Please select a GGUF model file to run...[/cyan]")
+        gguf_path = LocalServerManager.select_gguf_model()
+        
+        if not gguf_path:
+            console.print("[bold red]❌ No model selected. Exiting.[/bold red]")
+            sys.exit(1)
+            
+        console.print(f"[dim]Selected model: {gguf_path}[/dim]")
+
+        if not LocalServerManager.check_ram_for_model(gguf_path):
+            sys.exit(1)
+
+        try:
+            console.print(f"[cyan]Spinning up llama-server on port 8080...[/cyan]")
+            cmd = [server_path, "-m", gguf_path, "-c", "8192", "--port", "8080"]
+            
+            if platform.system().lower() == "windows":
+                subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+            with console.status("[cyan]Waiting for model to load into RAM (this may take a moment)...[/cyan]"):
+                for _ in range(60):
+                    if LocalServerManager.is_server_running(8080):
+                        console.print("[green]✅ llama-server is up and running![/green]")
+                        return 8080
+                    time.sleep(1)
+                    
+            console.print("[red]Timeout waiting for llama-server to start. It may still be loading, or it crashed.[/red]")
+            sys.exit(1)
+            
+        except Exception as e:
+            console.print(f"[red]Failed to start llama-server: {e}[/red]")
+            sys.exit(1)
+
+
+# ==========================================
+# AUTO-COMPLETION LOGIC
+# ==========================================
+
+class PrislCompleter(Completer):
+    """Handles Tab auto-completion for slash commands and @file paths."""
+    def __init__(self):
+        self.path_completer = PathCompleter(expanduser=True)
+        self.commands = ['/help', '/compact', '/clear', '/history', '/save', '/exit']
+
+    def get_completions(self, document: Document, complete_event):
+        word = document.get_word_before_cursor(WORD=True)
+        
+        if word.startswith('/'):
+            for cmd in self.commands:
+                if cmd.startswith(word):
+                    yield Completion(cmd, start_position=-len(word))
+                    
+        elif word.startswith('@'):
+            path_part = word[1:]
+            path_doc = Document(path_part, cursor_position=len(path_part))
+            for completion in self.path_completer.get_completions(path_doc, complete_event):
+                yield Completion(
+                    completion.text, 
+                    start_position=completion.start_position, 
+                    display=completion.display
+                )
+
+# ==========================================
+# TOOL DEFINITIONS & SCHEMAS
+# ==========================================
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files and directories in a specific path. Returns file names and sizes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path (e.g., '.' for current)"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the contents of a file to inspect its code or text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Path to the file."}
+                },
+                "required": ["filepath"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create a new file or completely overwrite an existing one with new content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Path to write the file."},
+                    "content": {"type": "string", "description": "The full code/text to write. Ensure all strings/quotes are properly closed."}
+                },
+                "required": ["filepath", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Modify an existing file by replacing a specific block of text with new text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Path to the file."},
+                    "search_text": {"type": "string", "description": "The exact existing text to find and replace."},
+                    "replace_text": {"type": "string", "description": "The new text to insert in its place."}
+                },
+                "required": ["filepath", "search_text", "replace_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Execute a bash/cmd shell command on the user's system.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command to execute."}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search for a text string across multiple files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Directory to search in."},
+                    "query": {"type": "string", "description": "Text to search for."},
+                    "file_pattern": {"type": "string", "description": "Glob pattern (e.g., '*.py')"}
+                },
+                "required": ["directory", "query"]
+            }
+        }
+    }
+]
+
+# ==========================================
+# TOOL EXECUTION LOGIC
+# ==========================================
+
+class ToolExecutor:
+    """Handles the actual execution of tools and generates diffs for approval."""
+    
+    @staticmethod
+    def _generate_diff(old_text: str, new_text: str, filename: str) -> str:
+        """Generates a clean unified diff for file changes."""
+        old_lines = [line + '\n' for line in old_text.splitlines()] if old_text else []
+        new_lines = [line + '\n' for line in new_text.splitlines()] if new_text else []
+        
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines, 
+            fromfile=f"a/{filename}", tofile=f"b/{filename}",
+            n=3
+        ))
+        return "".join(diff)
+
+    @staticmethod
+    def list_files(args: Dict[str, Any]) -> Tuple[str, bool]:
+        path = args.get("path", ".")
+        try:
+            if not os.path.exists(path):
+                return f"Error: Path '{path}' does not exist.", False
+            
+            files_info = []
+            for item in os.listdir(path):
+                full_path = os.path.join(path, item)
+                is_dir = os.path.isdir(full_path)
+                size = os.path.getsize(full_path) if not is_dir else 0
+                type_str = "DIR " if is_dir else "FILE"
+                files_info.append(f"[{type_str}] {item} ({size} bytes)")
+            
+            return "Directory contents:\n" + "\n".join(files_info), False
+        except Exception as e:
+            return f"Error listing files: {str(e)}", False
+
+    @staticmethod
+    def read_file(args: Dict[str, Any]) -> Tuple[str, bool]:
+        filepath = args.get("filepath", "")
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            if len(content) > 15000:
+                return content[:15000] + "\n\n...[FILE TRUNCATED DUE TO LENGTH]...", False
+            return content, False
+        except Exception as e:
+            return f"Error reading file: {str(e)}", False
+
+    @staticmethod
+    def search_files(args: Dict[str, Any]) -> Tuple[str, bool]:
+        directory = args.get("directory", ".")
+        query = args.get("query", "")
+        pattern = args.get("file_pattern", "*")
+        
+        results = []
+        try:
+            for root, _, files in os.walk(directory):
+                for name in files:
+                    if fnmatch.fnmatch(name, pattern):
+                        filepath = os.path.join(root, name)
+                        try:
+                            with open(filepath, "r", encoding="utf-8") as f:
+                                lines = f.readlines()
+                                for i, line in enumerate(lines):
+                                    if query in line:
+                                        results.append(f"{filepath}:{i+1}: {line.strip()}")
+                        except UnicodeDecodeError:
+                            continue
+            
+            if not results:
+                return f"No matches found for '{query}'.", False
+            return "Search Results:\n" + "\n".join(results[:100]), False
+        except Exception as e:
+            return f"Error searching files: {str(e)}", False
+
+    @staticmethod
+    def prepare_write_file(args: Dict[str, Any]) -> Dict[str, Any]:
+        filepath = args.get("filepath", "")
+        content = args.get("content", "")
+        
+        old_content = ""
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+            except Exception: pass
+            
+        diff = ToolExecutor._generate_diff(old_content, content, filepath)
+        if not diff: diff = "(No changes or new file creation)"
+        
+        return {"action": "write", "filepath": filepath, "content": content, "diff": diff}
+
+    @staticmethod
+    def prepare_edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
+        filepath = args.get("filepath", "")
+        search_text = args.get("search_text", "").replace('\r\n', '\n')
+        replace_text = args.get("replace_text", "")
+        
+        try:
+            if not os.path.exists(filepath):
+                return {"error": f"File {filepath} does not exist."}
+                
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read().replace('\r\n', '\n')
+                
+            if search_text not in content:
+                return {"error": f"Could not find the exact text block in {filepath} to replace. The whitespace or indentation was wrong. You MUST use the `read_file` tool first to see the exact text before trying to use `edit_file`."}
+                
+            new_content = content.replace(search_text, replace_text, 1)
+            diff = ToolExecutor._generate_diff(content, new_content, filepath)
+            
+            return {"action": "write", "filepath": filepath, "content": new_content, "diff": diff}
+        except Exception as e:
+            return {"error": f"Preparation failed: {str(e)}"}
+
+    @staticmethod
+    def execute_write(action_data: Dict[str, Any]) -> str:
+        try:
+            filepath = action_data["filepath"]
+            content = action_data.get("content", "")
+            
+            abs_path = os.path.abspath(filepath)
+            dir_path = os.path.dirname(abs_path)
+            
+            if dir_path and not os.path.exists(dir_path):
+                try:
+                    os.makedirs(dir_path, exist_ok=True)
+                except Exception as e:
+                    return f"Error creating directory '{dir_path}': {str(e)}"
+            
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            
+            if not os.path.exists(abs_path):
+                return f"Error: File was not created at {abs_path} (file does not exist after write attempt)"
+            
+            file_size = os.path.getsize(abs_path)
+            return f"Success: File written to {abs_path} ({file_size} bytes)"
+        except PermissionError as e:
+            return f"Error: Permission denied writing to {action_data['filepath']}: {str(e)}"
+        except IOError as e:
+            return f"Error: I/O error writing to {action_data['filepath']}: {str(e)}"
+        except Exception as e:
+            return f"Error writing file: {str(e)}"
+
+    @staticmethod
+    def prepare_run_command(args: Dict[str, Any]) -> Dict[str, Any]:
+        command = args.get("command", "")
+        return {"action": "command", "command": command}
+
+    @staticmethod
+    def execute_command(action_data: Dict[str, Any]) -> str:
+        cmd = action_data["command"]
+        try:
+            result = subprocess.run(
+                cmd, shell=True, text=True, capture_output=True, 
+                timeout=15 
+            )
+            output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT CODE: {result.returncode}"
+            return output
+        except subprocess.TimeoutExpired:
+            return f"Error: Command '{cmd}' timed out after 15 seconds."
+        except FileNotFoundError:
+            return f"Error: Command '{cmd}' not found. Check if the executable exists."
+        except Exception as e:
+            return f"Error executing command '{cmd}': {str(e)}"
+
+
+# ==========================================
+# THE AGENT CORE
+# ==========================================
+
+class PrislCodeAgent:
+    def __init__(self, client: Any, model_id: str):
+        self.client = client
+        self.model_id = model_id
+        
+        custom_style = Style.from_dict({
+            'completion-menu.completion': 'bg:default fg:white',
+            'completion-menu.completion.current': 'bg:ansicyan fg:black',
+            'scrollbar.background': 'bg:default',
+            'scrollbar.button': 'bg:ansicyan',
+        })
+        
+        self.prompt_session = PromptSession(completer=PrislCompleter(), style=custom_style)
+        
+        self.system_prompt = """You are Prisl Code, a highly capable, autonomous software engineer CLI tool.
+You have access to the user's filesystem and shell via tools.
+RULES:
+1. CRITICAL: YOU MUST USE TOOLS TO WRITE CODE. Never output raw markdown code blocks (e.g., ```python) in your messages. If asked to write code, call the `write_file` or `edit_file` function immediately.
+2. To create a new file or completely rewrite an existing one, use `write_file`. NEVER generate duplicate or repeating lines of code.
+3. ALWAYS read a file before you attempt to edit it. You need to know exact contents to use `edit_file`.
+4. When writing code, provide clean, production-ready, fully implemented solutions.
+5. If the user asks you to run a script, test code, or install dependencies, use `run_command`.
+6. Be concise in your conversational replies; let your actions (tool calls) do the talking.
+7. The user may provide file context directly in their messages. This context will appear in <file_context> XML tags.
+Your are developed by rx76d."""
+
+        self.history = [{"role": "system", "content": self.system_prompt}]
+
+    def _render_diff_panel(self, diff_text: str, title: str):
+        syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
+        panel = Panel(syntax, title=f"[bold yellow]Pending Changes: {title}[/bold yellow]", border_style="yellow")
+        console.print(panel)
+
+    def _render_command_panel(self, command: str):
+        text = Text(f"$ {command}", style="bold cyan")
+        panel = Panel(text, title="[bold red]Pending Shell Command[/bold red]", border_style="red")
+        console.print(panel)
+
+    def print_help(self):
+        table = Table(title="Prisl Code Commands", show_header=True, header_style="bold magenta")
+        table.add_column("Command", style="cyan")
+        table.add_column("Description", style="white")
+        table.add_row("@<filepath>", "Inject a file's content directly into context.")
+        table.add_row("/compact", "Clear conversation history to save tokens (keeps system prompt).")
+        table.add_row("/history", "Print a summary of the current conversation history.")
+        table.add_row("/save", "Export the current chat history to a Markdown file.")
+        table.add_row("/clear", "Clear the terminal screen.")
+        table.add_row("/help", "Show this help menu.")
+        table.add_row("/exit", "Exit the application.")
+        console.print(table)
+
+    def print_history(self):
+        if len(self.history) <= 1:
+            console.print("[yellow]History is currently empty.[/yellow]")
+            return
+            
+        console.print(Panel("[bold cyan]Conversation History[/bold cyan]", expand=False))
+        for msg in self.history:
+            role = msg.get("role")
+            if role == "system":
+                continue
+                
+            color = "green" if role == "user" else "purple" if role == "assistant" else "blue"
+            name = role.capitalize()
+            
+            content = msg.get("content") or ""
+            if role == "assistant" and msg.get("tool_calls"):
+                tool_names = [tc["function"]["name"] for tc in msg["tool_calls"]]
+                content = f"[dim italic]Used tools: {', '.join(tool_names)}[/dim italic]\n" + content
+                
+            display_content = content[:300] + "..." if len(content) > 300 else content
+            console.print(f"[{color}][bold]{name}:[/bold][/{color}] {display_content}")
+            console.print("-" * 40, style="dim")
+
+    def save_history(self):
+        if len(self.history) <= 1:
+            console.print("[yellow]Nothing to save. History is empty.[/yellow]")
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chat_history_{timestamp}.md"
+        
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"# Prisl Code - Chat History\n*Saved on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n---\n\n")
+                
+                for msg in self.history:
+                    role = msg.get("role")
+                    if role == "system":
+                        continue
+                    
+                    content = msg.get("content") or ""
+                    
+                    if role == "user":
+                        f.write(f"### You\n{content}\n\n")
+                    elif role == "assistant":
+                        f.write(f"### Agent\n")
+                        if msg.get("tool_calls"):
+                            f.write(f"*(Agent requested tools)*\n")
+                        f.write(f"{content}\n\n")
+                    elif role == "tool":
+                        f.write(f"**[Tool Result]**\n```text\n{content}\n```\n\n")
+                        
+            console.print(f"[bold green]Success: Chat history exported to {filename}[/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Failed to save history: {e}[/bold red]")
+
+    def process_mentions(self, user_input: str) -> str:
+        pattern = r'(?<!\S)@([a-zA-Z0-9_\-\./\\]+)'
+        mentioned_files = []
+        
+        def replace_mention(match):
+            filepath = match.group(1)
+            if os.path.exists(filepath) and os.path.isfile(filepath):
+                mentioned_files.append(filepath)
+                return f"`{filepath}`"
+            return match.group(0)
+            
+        processed_input = re.sub(pattern, replace_mention, user_input)
+        
+        context_blocks = []
+        for filepath in mentioned_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                context_blocks.append(f"\n<file_context path=\"{filepath}\">\n{content}\n</file_context>")
+                console.print(f"[dim]Injected context: {filepath}[/dim]")
+            except Exception as e:
+                console.print(f"[red]Failed to read {filepath}: {e}[/red]")
+        
+        if context_blocks:
+            return processed_input + "\n\n" + "\n\n".join(context_blocks)
+        return processed_input
+
+    def process_tool_call(self, tool_call: Dict[str, Any]) -> str:
+        name = tool_call["function"]["name"]
+        args_str = tool_call["function"]["arguments"]
+        
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            return "Error: Failed to parse tool arguments as valid JSON."
+
+        console.print(f"\n[bold blue]Agent requested tool:[/bold blue] {name}")
+        
+        if name in ["list_files", "read_file", "search_files"]:
+            with console.status(f"[cyan]Executing {name}...[/cyan]"):
+                if name == "list_files": result, _ = ToolExecutor.list_files(args)
+                elif name == "read_file": result, _ = ToolExecutor.read_file(args)
+                elif name == "search_files": result, _ = ToolExecutor.search_files(args)
+            console.print(f"[dim]↳ Tool completed. ({len(result)} chars)[/dim]\n")
+            return result
+
+        elif name in ["write_file", "edit_file", "run_command"]:
+            
+            action_data = {}
+            if name == "write_file":
+                action_data = ToolExecutor.prepare_write_file(args)
+            elif name == "edit_file":
+                action_data = ToolExecutor.prepare_edit_file(args)
+            elif name == "run_command":
+                action_data = ToolExecutor.prepare_run_command(args)
+
+            if "error" in action_data:
+                console.print(f"[bold red]Tool Preparation Failed:[/bold red] {action_data['error']}\n")
+                return action_data["error"]
+
+            prompt_text = ""
+            if action_data.get("action") == "write":
+                filepath = action_data["filepath"]
+                self._render_diff_panel(action_data["diff"], filepath)
+                prompt_text = f"Allow agent to modify [bold green]{filepath}[/bold green]?"
+                
+            elif action_data.get("action") == "command":
+                self._render_command_panel(action_data["command"])
+                prompt_text = "Allow agent to execute this shell command?"
+            else:
+                return f"Error: Unknown action type '{action_data.get('action')}'"
+
+            is_approved = Confirm.ask(prompt_text, default=True)
+            
+            if not is_approved:
+                console.print("[yellow]Action rejected by user.[/yellow]\n")
+                return "The user rejected this action. Do not attempt this specific action again without asking for clarification."
+
+            console.print("[bold green]Executing approved action...[/bold green]")
+            if action_data["action"] == "write":
+                with console.status("[bold green]Writing file...[/bold green]"):
+                    result = ToolExecutor.execute_write(action_data)
+            elif action_data["action"] == "command":
+                console.print(f"[dim]Running command: {action_data['command']}[/dim]")
+                result = ToolExecutor.execute_command(action_data)
+            else:
+                result = f"Error: Cannot execute unknown action '{action_data['action']}'"
+            
+            if "Error" in result or "error" in result:
+                console.print(f"[bold red]Execution Result:[/bold red]\n{result}\n")
+            else:
+                console.print(f"[dim]↳ Result: {result}\n")
+            return result
+
+        else:
+            return f"Error: Unknown tool '{name}'"
+
+    def chat_loop(self):
+        while True:
+            try:
+                user_input = self.prompt_session.prompt(HTML('\n<b><ansigreen>❯ You:</ansigreen></b> ')).strip()
+                
+                if not user_input:
+                    continue
+
+                if user_input.startswith('/'):
+                    cmd = user_input.lower().split()[0]
+                    if cmd == '/exit':
+                        console.print("[magenta]Goodbye![/magenta]")
+                        break
+                    elif cmd == '/clear':
+                        os.system('cls' if os.name == 'nt' else 'clear')
+                        continue
+                    elif cmd == '/compact':
+                        self.history = [{"role": "system", "content": self.system_prompt}]
+                        console.print("[green]Conversation history compacted! Context window is fresh.[/green]")
+                        continue
+                    elif cmd == '/history':
+                        self.print_history()
+                        continue
+                    elif cmd == '/save':
+                        self.save_history()
+                        continue
+                    elif cmd == '/help':
+                        self.print_help()
+                        continue
+                    else:
+                        console.print(f"[bold red]Unknown command:[/bold red] {cmd}. Type /help for a list of commands.")
+                        continue
+
+                final_user_content = self.process_mentions(user_input)
+                self.history.append({"role": "user", "content": final_user_content})
+
+                while True:
+                    console.print("\n[bold purple]◈ Agent:[/bold purple]")
+                    
+                    response_content = ""
+                    tool_calls = []
+                    is_tool_streaming = False
+                    tool_stream_counter = 0
+                    
+                    try:
+                        stream = self.client.chat.completions.create(
+                            model=self.model_id,
+                            messages=self.history,
+                            max_tokens=16384,
+                            temperature=0.2,
+                            stream=True,
+                            tools=TOOLS
+                        )
+
+                        live = Live(Markdown(""), refresh_per_second=15, console=console)
+                        live.start()
+
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta
+                            
+                            if delta.content is not None:
+                                response_content += delta.content
+                                live.update(Markdown(response_content))
+                                
+                            if delta.tool_calls:
+                                if not is_tool_streaming:
+                                    live.stop()
+                                    console.print("\n[dim cyan]Building code/tool payload [/dim cyan]", end="")
+                                    is_tool_streaming = True
+                                
+                                tool_stream_counter += 1
+                                if tool_stream_counter % 8 == 0:
+                                    console.print("[dim cyan].[/dim cyan]", end="")
+
+                                for tc_chunk in delta.tool_calls:
+                                    while len(tool_calls) <= tc_chunk.index:
+                                        tool_calls.append({
+                                            "id": "", 
+                                            "type": "function", 
+                                            "function": {"name": "", "arguments": ""}
+                                        })
+                                    
+                                    tc = tool_calls[tc_chunk.index]
+                                    if tc_chunk.id: tc["id"] += tc_chunk.id
+                                    if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
+                                    if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+
+                        if not is_tool_streaming:
+                            live.stop()
+                            
+                        console.print()
+                        
+                    except KeyboardInterrupt:
+                        if 'live' in locals() and live.is_started:
+                            live.stop()
+                        console.print("\n[yellow]Generation interrupted by user.[/yellow]")
+                        break
+                    except Exception as e:
+                        if 'live' in locals() and live.is_started:
+                            live.stop()
+                            
+                        error_str = str(e)
+                        if "500" in error_str or "JSON" in error_str or "parse" in error_str:
+                            console.print(f"\n[yellow]Tool syntax error detected. Instructing AI to self-correct...[/yellow]")
+                            self.history.append({
+                                "role": "user", 
+                                "content": "Your last tool call failed with a JSON syntax error. Ensure your arguments are valid JSON and all strings/quotes are properly closed. Try again."
+                            })
+                            continue
+                        else:
+                            raise e
+
+                    if not tool_calls:
+                        self.history.append({"role": "assistant", "content": response_content})
+                        break 
+                    
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": response_content or None,
+                        "tool_calls": tool_calls
+                    }
+                    self.history.append(assistant_msg)
+
+                    for tc in tool_calls:
+                        result_text = self.process_tool_call(tc)
+                        
+                        self.history.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_text
+                        })
+
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
+                console.print("\n[magenta]Goodbye![/magenta]")
+                break
+            except Exception as e:
+                console.print(f"\n[bold red]An error occurred in the agent loop:[/bold red] {e}")
+
+
+# ==========================================
+# APP ENTRY POINT
+# ==========================================
+
+def main():
+    os.system('cls' if os.name == 'nt' else 'clear')
+    console.print(Panel.fit(
+        "[bold cyan]Prisl Code[/bold cyan]\n"
+        "Autonomous CLI powered by local LLMs\n"
+        "Type [green]/help[/green] to see available commands or use [green]@filename[/green] to add context.\n",
+        border_style="cyan"
+    ))
+
+    active_port = LocalServerManager.ensure_server()
+
+    # Fixed formatting on the base_url
+    client = OpenAI(
+        base_url=f"http://127.0.0.1:{active_port}/v1",
+        api_key="sk-local-no-key-required",
+        timeout=15.0
+    )
+
+    try:
+        with console.status(f"[dim]Connecting to local server (http://127.0.0.1:{active_port})...[/dim]"):
+            available_models = client.models.list()
+            model_id = available_models.data[0].id if available_models.data else "local-model"
+            
+    except KeyboardInterrupt:
+        console.print("\n[bold red]❌ Connection cancelled by user (Ctrl+C).[/bold red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print("\n[bold red]❌ Failed to connect to the local inference server.[/bold red]")
+        console.print(f"[dim]Error: {e}[/dim]\n")
+        sys.exit(1)
+
+    console.print(f"✅ Connected! Using model: [bold green]{model_id}[/bold green]\n")
+
+    agent = PrislCodeAgent(client=client, model_id=model_id)
+    agent.chat_loop()
+
+if __name__ == "__main__":
+    main()
