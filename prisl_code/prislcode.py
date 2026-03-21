@@ -87,7 +87,11 @@ def bootstrap_venv():
 
     print("[Bootstrapper] Relaunching inside virtual environment...\n")
     
-    sys.exit(subprocess.call([venv_python, __file__] + sys.argv[1:]))
+    try:
+        sys.exit(subprocess.call([venv_python, __file__] + sys.argv[1:]))
+    except KeyboardInterrupt:
+        print("\n[Bootstrapper] Relaunch interrupted by user.")
+        sys.exit(1)
 
 bootstrap_venv()
 
@@ -989,40 +993,35 @@ Your are developed by rx76d."""
 # ==========================================
 
 def main():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    console.print(Panel.fit(
-        "[bold cyan]Prisl Code[/bold cyan]\n"
-        "Autonomous CLI powered by local LLMs\n"
-        "Type [green]/help[/green] to see available commands or use [green]@filename[/green] to add context.\n",
-        border_style="cyan"
-    ))
-
-    active_port = LocalServerManager.ensure_server()
-
-    # Fixed formatting on the base_url
-    client = OpenAI(
-        base_url=f"http://127.0.0.1:{active_port}/v1",
-        api_key="sk-local-no-key-required",
-        timeout=15.0
-    )
-
     try:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        console.print(Panel.fit(
+            "[bold cyan]Prisl Code[/bold cyan]\n"
+            "Autonomous CLI powered by local LLMs\n"
+            "Type [green]/help[/green] to see available commands or use [green]@filename[/green] to add context.\n",
+            border_style="cyan"
+        ))
+
+        active_port = LocalServerManager.ensure_server()
+
+        client = OpenAI(
+            base_url=f"http://127.0.0.1:{active_port}/v1",
+            api_key="sk-local-no-key-required",
+            timeout=15.0
+        )
+
         with console.status(f"[dim]Connecting to local server (http://127.0.0.1:{active_port})...[/dim]"):
             available_models = client.models.list()
             model_id = available_models.data[0].id if available_models.data else "local-model"
-            
+                
+        console.print(f"✅ Connected! Using model: [bold green]{model_id}[/bold green]\n")
+
+        agent = PrislCodeAgent(client=client, model_id=model_id)
+        agent.chat_loop()
     except KeyboardInterrupt:
-        console.print("\n[bold red]❌ Connection cancelled by user (Ctrl+C).[/bold red]")
-        sys.exit(1)
+        console.print("\n[bold red]❌ Interrupted by user (Ctrl+C). Exiting...[/bold red]")
     except Exception as e:
-        console.print("\n[bold red]❌ Failed to connect to the local inference server.[/bold red]")
-        console.print(f"[dim]Error: {e}[/dim]\n")
-        sys.exit(1)
-
-    console.print(f"✅ Connected! Using model: [bold green]{model_id}[/bold green]\n")
-
-    agent = PrislCodeAgent(client=client, model_id=model_id)
-    agent.chat_loop()
+        console.print(f"\n[bold red]❌ Error: {e}[/bold red]")
 
 if __name__ == "__main__":
     main()
