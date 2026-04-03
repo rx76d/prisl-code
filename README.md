@@ -44,7 +44,7 @@ On its first run, it will take a few moments to quietly set up its isolated envi
 ```bash
 pip uninstall prisl-code
 ```
-> It will remove pip completely, along with its isolated environments and cache.
+> It will remove prisl-code completely, along with its isolated environments, cache and it PATH.
 
 ## License
 
