@@ -31,32 +31,94 @@ import urllib.request
 import shutil
 import time
 import zipfile
-from typing import Dict, Any, Tuple
+import tarfile
+from typing import Dict, Any, Tuple, List, Optional
 
 # ==========================================
 # VIRTUAL ENVIRONMENT BOOTSTRAP
 # ==========================================
 
+# ==========================================
+# UNINSTALL LOGIC
+# ==========================================
+
+def uninstall_prisl_code():
+    """Completely removes the Prisl Code environment, binaries, and cache."""
+    from rich.prompt import Confirm
+    from rich.panel import Panel
+    from rich.console import Console
+    
+    console = Console()
+    
+    console.print(Panel.fit(
+        "[bold red]UNINSTALL PRISL CODE[/bold red]\n"
+        "This will permanently delete the virtual environment, LLM binaries, and cache.",
+        border_style="red"
+    ))
+    
+    if not Confirm.ask("[bold yellow]Are you absolutely sure you want to proceed?[/bold yellow]", default=False):
+        console.print("[green]Uninstall cancelled.[/green]")
+        return
+
+    home_dir = os.path.expanduser("~")
+    prisl_dir = os.path.join(home_dir, ".prisl_code")
+    if os.path.exists(prisl_dir):
+        console.print(f"[dim]Removing environment: {prisl_dir}...[/dim]")
+        try:
+            shutil.rmtree(prisl_dir, ignore_errors=True)
+            console.print("[green]Removed environment.[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to remove environment: {e}[/red]")
+
+    llama_bin = os.path.join(os.getcwd(), "llama_bin")
+    if os.path.exists(llama_bin):
+        console.print(f"[dim]Removing binaries: {llama_bin}...[/dim]")
+        try:
+            shutil.rmtree(llama_bin, ignore_errors=True)
+            console.print("[green]Removed local binaries.[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to remove binaries: {e}[/red]")
+
+    console.print("[dim]Cleaning up Prisl Code cache and build files...[/dim]")
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    count = 0
+    for root, dirs, files in os.walk(package_dir):
+        for d in list(dirs):
+            if d == "__pycache__" or d.endswith(".egg-info") or d == ".pytest_cache" or d == ".build" or d == "dist":
+                target = os.path.join(root, d)
+                try:
+                    shutil.rmtree(target, ignore_errors=True)
+                    count += 1
+                except: pass
+    console.print(f"[green]Removed {count} internal cache/build directories.[/green]")
+
+    console.print("[dim]Attempting to uninstall package via pip...[/dim]")
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "uninstall", "prisl-code", "-y"], capture_output=True)
+        console.print("[green]Uninstalled package from current environment.[/green]")
+    except Exception as e:
+        console.print(f"[yellow]Could not uninstall via pip: {e}[/yellow]")
+
+    console.print("\n[bold green]Prisl Code has been uninstalled successfully.[/bold green]")
+    sys.exit(0)
+
 def bootstrap_venv():
     """Ensures the script runs inside an isolated virtual environment with all dependencies."""
-    # Use the user's home directory so we don't get permission errors when installed globally
     home_dir = os.path.expanduser("~")
     venv_dir = os.path.join(home_dir, ".prisl_code", "env")
     
     if platform.system() == "Windows":
         venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
-        venv_pip = os.path.join(venv_dir, "Scripts", "pip.exe")
     else:
         venv_python = os.path.join(venv_dir, "bin", "python")
-        venv_pip = os.path.join(venv_dir, "bin", "pip")
 
     if os.path.normcase(sys.executable) == os.path.normcase(venv_python):
         return
 
-    print("\n[Bootstrapper] Checking isolated environment...")
+    print("\n[PRISL-CODE] Checking isolated environment...")
     
     if not os.path.exists(venv_python):
-        print("\n[Bootstrapper] First run detected. Creating an isolated environment...")
+        print("\n[PRISL-CODE] First run detected. Creating an isolated environment...")
         
         if os.path.exists(venv_dir):
             shutil.rmtree(venv_dir, ignore_errors=True)
@@ -66,34 +128,46 @@ def bootstrap_venv():
         try:
             venv.create(venv_dir, with_pip=True)
             
-            print("[Bootstrapper] Installing required dependencies...")
+            print("[PRISL-CODE] Installing required dependencies...")
             deps = ["openai", "rich", "prompt_toolkit", "psutil"]
             
-            subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "-q"])
-            
-            result = subprocess.run([venv_pip, "install"] + deps)
-            
+            subprocess.run(
+                [venv_python, "-m", "pip", "install", "--upgrade", "pip", "-q"],
+                capture_output=True,
+            )
+
+            result = subprocess.run(
+                [venv_python, "-m", "pip", "install"] + deps,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+
             if result.returncode != 0:
-                print("[Bootstrapper] ERROR: Failed to install dependencies.")
+                print("\n[PRISL-CODE] ERROR: Failed to install one or more dependencies.")
+                if result.stderr:
+                    print(f"[PRISL-CODE] pip output:\n{result.stderr[-2000:]}")
+                if not shutil.which("git"):
+                    print("[PRISL-CODE] HINT: 'git' was NOT found on your system.")
+                    print("[PRISL-CODE]       Some pip packages require git to install.")
+                    print("[PRISL-CODE]       Install it from https://git-scm.com and re-run prisl-code.")
                 shutil.rmtree(venv_dir, ignore_errors=True)
                 sys.exit(1)
                 
-            print("[Bootstrapper] Dependencies installed successfully.")
+            print("[PRISL-CODE] Dependencies installed successfully.")
             
         except BaseException as e:
-            print(f"\n[Bootstrapper] Process interrupted or failed ({type(e).__name__}). Cleaning up corrupted environment...")
+            print(f"\n[PRISL-CODE] Process interrupted or failed ({type(e).__name__}). Cleaning up corrupted environment...")
             shutil.rmtree(venv_dir, ignore_errors=True)
             sys.exit(1)
 
-    print("[Bootstrapper] Relaunching inside virtual environment...\n")
-    
+    print("[PRISL-CODE] Relaunching inside virtual environment...\n")
+
+    script_path = os.path.abspath(__file__)
     try:
-        sys.exit(subprocess.call([venv_python, __file__] + sys.argv[1:]))
+        sys.exit(subprocess.call([venv_python, script_path] + sys.argv[1:]))
     except KeyboardInterrupt:
-        print("\n[Bootstrapper] Relaunch interrupted by user.")
+        print("\n[PRISL-CODE] Relaunch interrupted by user.")
         sys.exit(1)
 
-bootstrap_venv()
 
 try:
     from openai import OpenAI
@@ -107,7 +181,7 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.syntax import Syntax
-    from rich.prompt import Confirm
+    from rich.prompt import Confirm, Prompt
     from rich.live import Live
     from rich.text import Text
     from rich.table import Table
@@ -134,15 +208,6 @@ except ImportError:
     print("Please run: pip install psutil")
     sys.exit(1)
 
-try:
-    import tkinter as tk
-    from tkinter import filedialog
-except ImportError:
-    print("ERROR: The 'tkinter' library is missing.")
-    print("On Linux, you can install it with: sudo apt install python3-tk")
-    sys.exit(1)
-
-
 # ==========================================
 # CONFIGURATION & INITIALIZATION
 # ==========================================
@@ -155,31 +220,123 @@ console = Console()
 
 class LocalServerManager:
     """Manages the lifecycle of llama-server and RAM validation."""
-    
+
+    _GITHUB_UA = "Prisl-Code/1.0 (+https://github.com/rx76d/prisl-code)"
+
     @staticmethod
     def is_server_running(port: int) -> bool:
         """Checks if an OpenAI-compatible /v1/models endpoint is active."""
         try:
             url = f"http://127.0.0.1:{port}/v1/models"
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": LocalServerManager._GITHUB_UA}
+            )
             with urllib.request.urlopen(req, timeout=1.0) as response:
                 return response.status == 200
         except Exception:
             return False
 
     @staticmethod
+    def _try_install_tkinter() -> bool:
+        """Attempts to auto-install python3-tk via the system package manager (Linux/macOS only)."""
+        sys_os = platform.system()
+        console.print("[yellow]Attempting to auto-install tkinter...[/yellow]")
+
+        if sys_os == "Linux":
+            candidates = [
+                (["apt-get", "install", "-y", "python3-tk"], "apt-get"),
+                (["dnf",     "install", "-y", "python3-tkinter"], "dnf"),
+                (["yum",     "install", "-y", "python3-tkinter"], "yum"),
+                (["pacman",  "-S", "--noconfirm", "python-tk"],   "pacman"),
+                (["zypper",  "install", "-y", "python3-tk"],       "zypper"),
+            ]
+            for cmd, mgr in candidates:
+                if not shutil.which(mgr):
+                    continue
+                try:
+                    result = subprocess.run(
+                        ["sudo"] + cmd, timeout=60,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    )
+                    if result.returncode == 0:
+                        console.print("[green]✅ tkinter installed successfully via " + mgr + "![/green]")
+                        return True
+                    console.print(f"[red]{mgr} failed: {result.stderr.strip()[:400]}[/red]")
+                except Exception as e:
+                    console.print(f"[red]{mgr} error: {e}[/red]")
+            console.print(
+                "[red]Could not auto-install tkinter. Please run one of:\n"
+                "  Ubuntu/Debian : sudo apt-get install python3-tk\n"
+                "  Fedora/RHEL   : sudo dnf install python3-tkinter\n"
+                "  Arch          : sudo pacman -S python-tk[/red]"
+            )
+            return False
+
+        elif sys_os == "Darwin":
+            if shutil.which("brew"):
+                py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+                try:
+                    result = subprocess.run(
+                        ["brew", "install", f"python-tk@{py_ver}"],
+                        timeout=180, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    )
+                    if result.returncode == 0:
+                        console.print("[green]✅ tkinter installed via Homebrew![/green]")
+                        return True
+                    console.print(f"[red]brew failed: {result.stderr.strip()[:400]}[/red]")
+                except Exception as e:
+                    console.print(f"[red]brew error: {e}[/red]")
+            console.print(
+                "[red]Could not auto-install tkinter. Install Homebrew (https://brew.sh) then run:\n"
+                "  brew install python-tk[/red]"
+            )
+            return False
+
+        return False
+
+    @staticmethod
     def select_gguf_model() -> str:
-        """Opens a native file picker for the user to select a GGUF model."""
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        
-        file_path = filedialog.askopenfilename(
-            title="Select a GGUF Model to Run",
-            filetypes=[("GGUF Models", "*.gguf"), ("All files", "*.*")]
+        """Opens a native file picker when possible; otherwise prompts for a path (e.g. headless Linux)."""
+        sys_os = platform.system()
+        headless_linux = (
+            sys_os == "Linux"
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY")
         )
-        root.destroy()
-        return file_path
+
+        if not headless_linux:
+            file_path = None
+            for attempt in range(2):
+                try:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                except ImportError:
+                    if attempt == 0 and LocalServerManager._try_install_tkinter():
+                        continue
+                    console.print("[yellow]tkinter unavailable; falling back to manual path entry.[/yellow]")
+                    break
+
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    try:
+                        root.attributes("-topmost", True)
+                    except tk.TclError:
+                        pass
+                    file_path = filedialog.askopenfilename(
+                        title="Select a GGUF Model to Run",
+                        filetypes=[("GGUF Models", "*.gguf"), ("All files", "*.*")],
+                    )
+                    root.destroy()
+                except tk.TclError as e:
+                    console.print(f"[yellow]Could not open file dialog ({e}); enter path manually.[/yellow]")
+                break
+
+            if file_path:
+                return file_path
+
+        path = Prompt.ask("Path to your .gguf model file").strip()
+        return path.strip('"').strip("'")
 
     @staticmethod
     def check_ram_for_model(gguf_path: str) -> bool:
@@ -208,76 +365,164 @@ class LocalServerManager:
             return True
 
     @staticmethod
+    def _http_get(url: str, timeout: float = 120) -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": LocalServerManager._GITHUB_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read()
+
+    @staticmethod
+    def _release_asset_name_hints(sys_os: str, arch: str) -> List[str]:
+        """Ordered substrings matched against release asset filenames (llama.cpp ggml-org builds)."""
+        arch_l = arch.lower()
+        is_arm = arch_l in ("arm64", "aarch64")
+        is_x86_64 = arch_l in ("x86_64", "amd64", "x64")
+        if sys_os == "windows":
+            if is_arm:
+                return ["-bin-win-cpu-arm64.zip"]
+            return ["-bin-win-cpu-x64.zip", "-bin-win-avx2-x64.zip", "-bin-win-sse2-x64.zip"]
+        if sys_os == "darwin":
+            if is_arm:
+                return ["-bin-macos-arm64.tar.gz"]
+            if is_x86_64:
+                return ["-bin-macos-x64.tar.gz"]
+            return ["-bin-macos-arm64.tar.gz", "-bin-macos-x64.tar.gz"]
+        if sys_os == "linux":
+            if is_x86_64:
+                return ["-bin-ubuntu-x64.tar.gz"]
+            if is_arm:
+                return ["-bin-ubuntu-aarch64.tar.gz", "-bin-linux-aarch64.tar.gz", "-bin-ubuntu-arm64.tar.gz"]
+            return ["-bin-ubuntu-x64.tar.gz"]
+        return []
+
+    @staticmethod
+    def _pick_llama_binary_asset(
+        assets: List[dict], sys_os: str, arch: str
+    ) -> Optional[Tuple[str, str]]:
+        """Returns (download_url, filename) for the best matching prebuilt bundle, or None."""
+        arch_l = arch.lower()
+        is_arm = arch_l in ("arm64", "aarch64")
+        is_x86_64 = arch_l in ("x86_64", "amd64", "x64")
+
+        for hint in LocalServerManager._release_asset_name_hints(sys_os, arch):
+            for asset in assets:
+                name = asset.get("name") or ""
+                url = asset.get("browser_download_url")
+                if not url or not name.startswith("llama-"):
+                    continue
+                if "cudart-" in name.lower():
+                    continue
+                if hint not in name:
+                    continue
+                if not (name.endswith(".zip") or name.endswith(".tar.gz")):
+                    continue
+                nl = name.lower()
+                if (
+                    sys_os == "linux"
+                    and is_x86_64
+                    and "-bin-ubuntu-x64.tar.gz" in name
+                ):
+                    if any(x in nl for x in ("vulkan", "rocm", "openvino", "s390x")):
+                        continue
+                return (url, name)
+
+        if sys_os == "linux" and is_arm:
+            for asset in assets:
+                name = asset.get("name") or ""
+                url = asset.get("browser_download_url")
+                if not url or not name.startswith("llama-"):
+                    continue
+                nl = name.lower()
+                if "cudart" in nl or "xcframework" in nl:
+                    continue
+                if "bin-" in nl and "aarch64" in nl and nl.endswith(".tar.gz"):
+                    return (url, name)
+
+        return None
+
+    @staticmethod
+    def _extract_archive_bundle(archive_path: str, dest_dir: str) -> None:
+        if archive_path.endswith(".zip"):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(dest_dir)
+        elif archive_path.endswith(".tar.gz") or archive_path.endswith(".tgz"):
+            with tarfile.open(archive_path, "r:gz") as tf:
+                tf.extractall(dest_dir, filter='data')
+        else:
+            raise ValueError(f"Unsupported archive format: {archive_path}")
+
+    @staticmethod
     def download_llama_server() -> str:
-        """Downloads the latest pre-compiled llama-server from GitHub based on OS."""
+        """Downloads a pre-built llama-server from the official llama.cpp GitHub release."""
         sys_os = platform.system().lower()
         arch = platform.machine().lower()
-        
-        if sys_os == "windows":
-            asset_keyword = "win-avx2-x64"
-            ext = ".zip"
-            exe_name = "llama-server.exe"
-        elif sys_os == "darwin":
-            asset_keyword = "macos-arm64" if arch in ["arm64", "aarch64"] else "macos-x64"
-            ext = ".zip"
-            exe_name = "llama-server"
-        elif sys_os == "linux":
-            asset_keyword = "ubuntu-x64"
-            ext = ".zip"
-            exe_name = "llama-server"
-        else:
+        exe_name = "llama-server.exe" if sys_os == "windows" else "llama-server"
+
+        if sys_os not in ("windows", "darwin", "linux"):
             console.print(f"[red]Unsupported OS for auto-download: {sys_os}[/red]")
             return ""
 
-        with console.status("[cyan]Fetching latest llama.cpp releases from GitHub...[/cyan]"):
+        release_api = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+        with console.status("[cyan]Fetching latest llama.cpp release from GitHub...[/cyan]"):
             try:
-                req = urllib.request.Request("https://api.github.com/repos/ggerganov/llama.cpp/releases/latest")
-                with urllib.request.urlopen(req) as response:
-                    data = json.loads(response.read().decode())
-                
-                download_url = None
-                for asset in data.get("assets", []):
-                    name = asset["name"]
-                    if asset_keyword in name and name.endswith(ext):
-                        download_url = asset["browser_download_url"]
-                        break
-                        
-                if not download_url:
-                    console.print("[red]Could not find a matching pre-compiled binary for your system.[/red]")
-                    return ""
-                    
-                bin_dir = os.path.join(os.getcwd(), "llama_bin")
-                os.makedirs(bin_dir, exist_ok=True)
-                zip_path = os.path.join(bin_dir, "llama_download" + ext)
-                
-                console.print(f"[cyan]Downloading llama-server (~20-50MB)...[/cyan]")
-                urllib.request.urlretrieve(download_url, zip_path)
-                
-                console.print("[cyan]Extracting binaries...[/cyan]")
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(bin_dir)
-                    
-                os.remove(zip_path)
-                
-                server_path = ""
-                for root, _, files in os.walk(bin_dir):
-                    if exe_name in files:
-                        server_path = os.path.join(root, exe_name)
-                        break
-                
-                if not server_path:
-                    console.print("[red]Extraction completed but executable not found.[/red]")
-                    return ""
-
-                if sys_os != "windows":
-                    os.chmod(server_path, 0o755)
-                    
-                console.print("[green]✅ Successfully installed llama-server![/green]")
-                return server_path
-                
+                data = json.loads(LocalServerManager._http_get(release_api).decode("utf-8"))
             except Exception as e:
-                console.print(f"[red]Error downloading llama-server: {e}[/red]")
+                console.print(f"[red]Could not read llama.cpp release info: {e}[/red]")
                 return ""
+
+        assets = data.get("assets") or []
+        picked = LocalServerManager._pick_llama_binary_asset(assets, sys_os, arch)
+        if not picked:
+            console.print(
+                f"[red]No matching pre-built llama-server for {sys_os} ({arch}). "
+                "Install `llama-server` on your PATH or build from source.[/red]"
+            )
+            return ""
+
+        download_url, archive_name = picked
+        console.print(f"[dim]Selected asset: {archive_name}[/dim]")
+
+        bin_dir = os.path.join(os.getcwd(), "llama_bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        dl_ext = ".zip" if archive_name.endswith(".zip") else ".tar.gz"
+        archive_path = os.path.join(bin_dir, "llama_download" + dl_ext)
+
+        try:
+            console.print("[cyan]Downloading llama-server binaries...[/cyan]")
+            dl_req = urllib.request.Request(
+                download_url, headers={"User-Agent": LocalServerManager._GITHUB_UA}
+            )
+            with urllib.request.urlopen(dl_req, timeout=300) as resp:
+                with open(archive_path, "wb") as out:
+                    shutil.copyfileobj(resp, out)
+
+            console.print("[cyan]Extracting...[/cyan]")
+            LocalServerManager._extract_archive_bundle(archive_path, bin_dir)
+            os.remove(archive_path)
+
+            server_path = ""
+            for root, _, files in os.walk(bin_dir):
+                if exe_name in files:
+                    server_path = os.path.join(root, exe_name)
+                    break
+
+            if not server_path:
+                console.print("[red]Extraction finished but llama-server was not found.[/red]")
+                return ""
+
+            if sys_os != "windows":
+                os.chmod(server_path, 0o755)
+
+            console.print("[green]✅ Successfully installed llama-server![/green]")
+            return server_path
+
+        except Exception as e:
+            console.print(f"[red]Error downloading or extracting llama-server: {e}[/red]")
+            try:
+                if os.path.exists(archive_path):
+                    os.remove(archive_path)
+            except OSError:
+                pass
+            return ""
 
     @staticmethod
     def ensure_server() -> int:
@@ -352,7 +597,7 @@ class PrislCompleter(Completer):
     """Handles Tab auto-completion for slash commands and @file paths."""
     def __init__(self):
         self.path_completer = PathCompleter(expanduser=True)
-        self.commands = ['/help', '/compact', '/clear', '/history', '/save', '/exit']
+        self.commands = ['/help', '/compact', '/clear', '/history', '/save', '/uninstall', '/exit']
 
     def get_completions(self, document: Document, complete_event):
         word = document.get_word_before_cursor(WORD=True)
@@ -626,8 +871,13 @@ class ToolExecutor:
         cmd = action_data["command"]
         try:
             result = subprocess.run(
-                cmd, shell=True, text=True, capture_output=True, 
-                timeout=15 
+                cmd,
+                shell=True,
+                text=True,
+                capture_output=True,
+                timeout=15,
+                encoding="utf-8",
+                errors="replace",
             )
             output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT CODE: {result.returncode}"
             return output
@@ -691,8 +941,10 @@ Your are developed by rx76d."""
         table.add_row("/save", "Export the current chat history to a Markdown file.")
         table.add_row("/clear", "Clear the terminal screen.")
         table.add_row("/help", "Show this help menu.")
+        table.add_row("/uninstall", "Completely remove Prisl Code and its environments.")
         table.add_row("/exit", "Exit the application.")
         console.print(table)
+        console.print("\n[dim]Note: You can also run 'prisl-code --uninstall' from your terminal.[/dim]")
 
     def print_history(self):
         if len(self.history) <= 1:
@@ -873,6 +1125,9 @@ Your are developed by rx76d."""
                     elif cmd == '/save':
                         self.save_history()
                         continue
+                    elif cmd == '/uninstall':
+                        uninstall_prisl_code()
+                        continue
                     elif cmd == '/help':
                         self.print_help()
                         continue
@@ -903,51 +1158,46 @@ Your are developed by rx76d."""
 
                         live = Live(Markdown(""), refresh_per_second=15, console=console)
                         live.start()
-
-                        for chunk in stream:
-                            delta = chunk.choices[0].delta
-                            
-                            if delta.content is not None:
-                                response_content += delta.content
-                                live.update(Markdown(response_content))
+                        try:
+                            for chunk in stream:
+                                delta = chunk.choices[0].delta
                                 
-                            if delta.tool_calls:
-                                if not is_tool_streaming:
-                                    live.stop()
-                                    console.print("\n[dim cyan]Building code/tool payload [/dim cyan]", end="")
-                                    is_tool_streaming = True
-                                
-                                tool_stream_counter += 1
-                                if tool_stream_counter % 8 == 0:
-                                    console.print("[dim cyan].[/dim cyan]", end="")
-
-                                for tc_chunk in delta.tool_calls:
-                                    while len(tool_calls) <= tc_chunk.index:
-                                        tool_calls.append({
-                                            "id": "", 
-                                            "type": "function", 
-                                            "function": {"name": "", "arguments": ""}
-                                        })
+                                if delta.content is not None:
+                                    response_content += delta.content
+                                    live.update(Markdown(response_content))
                                     
-                                    tc = tool_calls[tc_chunk.index]
-                                    if tc_chunk.id: tc["id"] += tc_chunk.id
-                                    if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
-                                    if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                                if delta.tool_calls:
+                                    if not is_tool_streaming:
+                                        live.stop()
+                                        console.print("\n[dim cyan]Building code/tool payload [/dim cyan]", end="")
+                                        is_tool_streaming = True
+                                    
+                                    tool_stream_counter += 1
+                                    if tool_stream_counter % 8 == 0:
+                                        console.print("[dim cyan].[/dim cyan]", end="")
 
-                        if not is_tool_streaming:
-                            live.stop()
-                            
+                                    for tc_chunk in delta.tool_calls:
+                                        while len(tool_calls) <= tc_chunk.index:
+                                            tool_calls.append({
+                                                "id": "", 
+                                                "type": "function", 
+                                                "function": {"name": "", "arguments": ""}
+                                            })
+                                        
+                                        tc = tool_calls[tc_chunk.index]
+                                        if tc_chunk.id: tc["id"] += tc_chunk.id
+                                        if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
+                                        if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                        finally:
+                            if live.is_started:
+                                live.stop()
+
                         console.print()
                         
                     except KeyboardInterrupt:
-                        if 'live' in locals() and live.is_started:
-                            live.stop()
                         console.print("\n[yellow]Generation interrupted by user.[/yellow]")
                         break
                     except Exception as e:
-                        if 'live' in locals() and live.is_started:
-                            live.stop()
-                            
                         error_str = str(e)
                         if "500" in error_str or "JSON" in error_str or "parse" in error_str:
                             console.print(f"\n[yellow]Tool syntax error detected. Instructing AI to self-correct...[/yellow]")
@@ -993,6 +1243,11 @@ Your are developed by rx76d."""
 # ==========================================
 
 def main():
+    if "--uninstall" in sys.argv:
+        uninstall_prisl_code()
+
+    bootstrap_venv()
+
     try:
         os.system('cls' if os.name == 'nt' else 'clear')
         console.print(Panel.fit(
@@ -1007,21 +1262,21 @@ def main():
         client = OpenAI(
             base_url=f"http://127.0.0.1:{active_port}/v1",
             api_key="sk-local-no-key-required",
-            timeout=15.0
+            timeout=60.0
         )
 
         with console.status(f"[dim]Connecting to local server (http://127.0.0.1:{active_port})...[/dim]"):
             available_models = client.models.list()
             model_id = available_models.data[0].id if available_models.data else "local-model"
                 
-        console.print(f"✅ Connected! Using model: [bold green]{model_id}[/bold green]\n")
+        console.print(f"Connected! Using model: [bold green]{model_id}[/bold green]\n")
 
         agent = PrislCodeAgent(client=client, model_id=model_id)
         agent.chat_loop()
     except KeyboardInterrupt:
-        console.print("\n[bold red]❌ Interrupted by user (Ctrl+C). Exiting...[/bold red]")
+        console.print("\n[bold red]Interrupted by user (Ctrl+C). Exiting...[/bold red]")
     except Exception as e:
-        console.print(f"\n[bold red]❌ Error: {e}[/bold red]")
+        console.print(f"\n[bold red]Error: {e}[/bold red]")
 
 if __name__ == "__main__":
     main()
