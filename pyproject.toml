@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prisl-code"
+version = "0.1.0"
+description = "Autonomous CLI powered by local LLMs"
+readme = "README.md"
+requires-python = ">=3.7"
+authors = [
+  { name = "rx76d" }
+]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/rx76d/prisl-code"
+
+[project.scripts]
+prisl-code = "prisl_code.prislcode:main"
+
+[tool.setuptools.packages.find]
+include = ["prisl_code*"]
