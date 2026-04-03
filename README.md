@@ -34,6 +34,17 @@ On its first run, it will take a few moments to quietly set up its isolated envi
 - **/help:** Show this help menu.
 - **/exit:** Exit the application.
 
+## Requirements
+- Python 3.8+
+- Pip 23.0+
+- Git
+
+## Uninstall
+
+```bash
+pip uninstall prisl-code
+```
+> It will remove pip completely, along with its isolated environments and cache.
 
 ## License
 
