@@ -29,10 +29,63 @@ import re
 import datetime
 import urllib.request
 import shutil
+import shlex
 import time
 import zipfile
 import tarfile
+import tempfile
 from typing import Dict, Any, Tuple, List, Optional
+
+
+def _is_windows() -> bool:
+    return os.name == "nt" or sys.platform.startswith("win")
+
+
+def _windows_powershell_exe() -> Optional[str]:
+    if not _is_windows():
+        return None
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    bundled = os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+    if os.path.isfile(bundled):
+        return bundled
+    for name in ("powershell.exe", "pwsh.exe"):
+        found = shutil.which(name)
+        if found and os.path.isfile(found):
+            return found
+    return None
+
+
+def _schedule_remove_dir_deferred_windows_cmd(path: str) -> None:
+    inner = path.replace("%", "%%")
+    fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="prisl_rm_")
+    os.close(fd)
+    lines = (
+        "@echo off\r\n"
+        "ping 127.0.0.1 -n 3 >nul\r\n"
+        f'if exist "{inner}" rd /s /q "{inner}"\r\n'
+        'del "%~f0"\r\n'
+    )
+    with open(bat_path, "wb") as f:
+        f.write(lines.encode("utf-8"))
+    cmd_exe = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"
+    )
+    if not os.path.isfile(cmd_exe):
+        cmd_exe = shutil.which("cmd.exe") or "cmd.exe"
+    creationflags = getattr(subprocess, "DETACHED_PROCESS", 8) | getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000
+    )
+    subprocess.Popen(
+        [cmd_exe, "/c", bat_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        close_fds=True,
+    )
+
 
 # ==========================================
 # VIRTUAL ENVIRONMENT BOOTSTRAP
@@ -41,6 +94,66 @@ from typing import Dict, Any, Tuple, List, Optional
 # ==========================================
 # UNINSTALL LOGIC
 # ==========================================
+
+def _schedule_remove_dir_deferred(path: str) -> None:
+    path = os.path.normpath(os.path.abspath(path))
+    if _is_windows():
+        ps_path = path.replace("'", "''")
+        ps_cmd = (
+            f"Start-Sleep -Seconds 2; "
+            f"if (Test-Path -LiteralPath '{ps_path}') {{ "
+            f"Remove-Item -LiteralPath '{ps_path}' -Recurse -Force -ErrorAction SilentlyContinue }}"
+        )
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 8) | getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000
+        )
+        ps_exe = _windows_powershell_exe()
+        if ps_exe:
+            subprocess.Popen(
+                [
+                    ps_exe,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle", "Hidden",
+                    "-Command",
+                    ps_cmd,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        else:
+            _schedule_remove_dir_deferred_windows_cmd(path)
+    else:
+        sh_bin = "/bin/sh" if os.path.isfile("/bin/sh") else (shutil.which("sh") or "sh")
+        subprocess.Popen(
+            [sh_bin, "-c", f"sleep 2; rm -rf {shlex.quote(path)}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+
+def _remove_prisl_user_home(prisl_dir: str, console) -> None:
+    if not os.path.exists(prisl_dir):
+        return
+    console.print(f"[dim]Removing environment: {prisl_dir}...[/dim]")
+    try:
+        shutil.rmtree(prisl_dir, ignore_errors=False)
+    except OSError:
+        shutil.rmtree(prisl_dir, ignore_errors=True)
+    if os.path.exists(prisl_dir):
+        _schedule_remove_dir_deferred(prisl_dir)
+        console.print(
+            "[yellow]The data folder is still in use. It will be deleted automatically a few seconds after you exit.[/yellow]"
+        )
+    else:
+        console.print("[green]Removed environment.[/green]")
+
 
 def uninstall_prisl_code():
     """Completely removes the Prisl Code environment, binaries, and cache."""
@@ -62,13 +175,7 @@ def uninstall_prisl_code():
 
     home_dir = os.path.expanduser("~")
     prisl_dir = os.path.join(home_dir, ".prisl_code")
-    if os.path.exists(prisl_dir):
-        console.print(f"[dim]Removing environment: {prisl_dir}...[/dim]")
-        try:
-            shutil.rmtree(prisl_dir, ignore_errors=True)
-            console.print("[green]Removed environment.[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to remove environment: {e}[/red]")
+    _remove_prisl_user_home(prisl_dir, console)
 
     llama_bin = os.path.join(os.getcwd(), "llama_bin")
     if os.path.exists(llama_bin):
@@ -107,10 +214,14 @@ def bootstrap_venv():
     home_dir = os.path.expanduser("~")
     venv_dir = os.path.join(home_dir, ".prisl_code", "env")
     
-    if platform.system() == "Windows":
+    if _is_windows():
         venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
     else:
         venv_python = os.path.join(venv_dir, "bin", "python")
+        if not os.path.exists(venv_python):
+            v3 = os.path.join(venv_dir, "bin", "python3")
+            if os.path.exists(v3):
+                venv_python = v3
 
     if os.path.normcase(sys.executable) == os.path.normcase(venv_python):
         return
@@ -334,7 +445,9 @@ class LocalServerManager:
                     root.withdraw()
                     try:
                         root.attributes("-topmost", True)
-                    except tk.TclError:
+                        root.lift()
+                        root.focus_force()
+                    except (tk.TclError, AttributeError):
                         pass
                     file_path = filedialog.askopenfilename(
                         title="Select a GGUF Model to Run",
@@ -459,7 +572,10 @@ class LocalServerManager:
                 zf.extractall(dest_dir)
         elif archive_path.endswith(".tar.gz") or archive_path.endswith(".tgz"):
             with tarfile.open(archive_path, "r:gz") as tf:
-                tf.extractall(dest_dir, filter='data')
+                if sys.version_info >= (3, 12):
+                    tf.extractall(dest_dir, filter="data")
+                else:
+                    tf.extractall(dest_dir)
         else:
             raise ValueError(f"Unsupported archive format: {archive_path}")
 
@@ -468,7 +584,7 @@ class LocalServerManager:
         """Downloads a pre-built llama-server from the official llama.cpp GitHub release."""
         sys_os = platform.system().lower()
         arch = platform.machine().lower()
-        exe_name = "llama-server.exe" if sys_os == "windows" else "llama-server"
+        exe_name = "llama-server.exe" if _is_windows() else "llama-server"
 
         if sys_os not in ("windows", "darwin", "linux"):
             console.print(f"[red]Unsupported OS for auto-download: {sys_os}[/red]")
@@ -522,7 +638,7 @@ class LocalServerManager:
                 console.print("[red]Extraction finished but llama-server was not found.[/red]")
                 return ""
 
-            if sys_os != "windows":
+            if not _is_windows():
                 os.chmod(server_path, 0o755)
 
             console.print("[green]✅ Successfully installed llama-server![/green]")
@@ -550,7 +666,7 @@ class LocalServerManager:
         server_path = shutil.which("llama-server")
         
         if not server_path:
-            exe_name = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+            exe_name = "llama-server.exe" if _is_windows() else "llama-server"
             local_bin = os.path.join(os.getcwd(), "llama_bin")
             if os.path.exists(local_bin):
                 for root, _, files in os.walk(local_bin):
@@ -582,10 +698,20 @@ class LocalServerManager:
             console.print(f"[cyan]Spinning up llama-server on port 8080...[/cyan]")
             cmd = [server_path, "-m", gguf_path, "-c", "8192", "--port", "8080"]
             
-            if platform.system().lower() == "windows":
-                subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            if _is_windows():
+                subprocess.Popen(
+                    cmd,
+                    creationflags=getattr(
+                        subprocess, "CREATE_NEW_CONSOLE", 0x00000010
+                    ),
+                )
             else:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
 
             with console.status("[cyan]Waiting for model to load into RAM (this may take a moment)...[/cyan]"):
                 for _ in range(60):
@@ -1016,11 +1142,11 @@ Your are developed by rx76d."""
             console.print(f"[bold red]Failed to save history: {e}[/bold red]")
 
     def process_mentions(self, user_input: str) -> str:
-        pattern = r'(?<!\S)@([a-zA-Z0-9_\-\./\\]+)'
+        pattern = r'(?<!\S)@([a-zA-Z0-9_\-\./\\\[\]]+)'
         mentioned_files = []
         
         def replace_mention(match):
-            filepath = match.group(1)
+            filepath = os.path.normpath(match.group(1))
             if os.path.exists(filepath) and os.path.isfile(filepath):
                 mentioned_files.append(filepath)
                 return f"`{filepath}`"
