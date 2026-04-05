@@ -169,12 +169,19 @@ def bootstrap_venv():
         sys.exit(1)
 
 
+def _exit_startup_interrupt():
+    print("\n[PRISL-CODE] Startup interrupted by user.")
+    sys.exit(1)
+
+
 try:
     from openai import OpenAI
 except ImportError:
     print("ERROR: The 'openai' library is missing.")
     print("Please run: pip install openai")
     sys.exit(1)
+except KeyboardInterrupt:
+    _exit_startup_interrupt()
 
 try:
     from rich.console import Console
@@ -189,6 +196,8 @@ except ImportError:
     print("ERROR: The 'rich' library is missing.")
     print("Please run: pip install rich")
     sys.exit(1)
+except KeyboardInterrupt:
+    _exit_startup_interrupt()
 
 try:
     from prompt_toolkit import PromptSession
@@ -200,6 +209,8 @@ except ImportError:
     print("ERROR: The 'prompt_toolkit' library is missing.")
     print("Please run: pip install prompt_toolkit")
     sys.exit(1)
+except KeyboardInterrupt:
+    _exit_startup_interrupt()
 
 try:
     import psutil
@@ -207,6 +218,8 @@ except ImportError:
     print("ERROR: The 'psutil' library is missing.")
     print("Please run: pip install psutil")
     sys.exit(1)
+except KeyboardInterrupt:
+    _exit_startup_interrupt()
 
 # ==========================================
 # CONFIGURATION & INITIALIZATION
