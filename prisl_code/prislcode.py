@@ -736,7 +736,7 @@ class PrislCompleter(Completer):
     """Handles Tab auto-completion for slash commands and @file paths."""
     def __init__(self):
         self.path_completer = PathCompleter(expanduser=True)
-        self.commands = ['/help', '/compact', '/clear', '/history', '/save', '/uninstall', '/exit']
+        self.commands = ['/help', '/compact', '/clear', '/history', '/save', '/exit']
 
     def get_completions(self, document: Document, complete_event):
         word = document.get_word_before_cursor(WORD=True)
@@ -1080,7 +1080,6 @@ Your are developed by rx76d."""
         table.add_row("/save", "Export the current chat history to a Markdown file.")
         table.add_row("/clear", "Clear the terminal screen.")
         table.add_row("/help", "Show this help menu.")
-        table.add_row("/uninstall", "Completely remove Prisl Code and its environments.")
         table.add_row("/exit", "Exit the application.")
         console.print(table)
         console.print("\n[dim]Note: You can also run 'prisl-code --uninstall' from your terminal.[/dim]")
@@ -1238,6 +1237,45 @@ Your are developed by rx76d."""
         else:
             return f"Error: Unknown tool '{name}'"
 
+    def get_safe_history(self) -> List[Dict[str, Any]]:
+        """Sanitizes history for strict model templates (like Llama 3) that crash on 'tool' roles."""
+        safe_history = []
+        for msg in self.history:
+            if msg.get("role") == "system":
+                safe_history.append(msg.copy())
+            elif msg.get("role") == "tool":
+                safe_history.append({
+                    "role": "user",
+                    "content": f"[Tool Execution Result]\n{msg.get('content', '')}"
+                })
+            elif msg.get("role") == "assistant":
+                content = msg.get("content") or ""
+                if not content and msg.get("tool_calls"):
+                    calls_text = []
+                    for tc in msg.get("tool_calls", []):
+                        calls_text.append(f"{tc.get('function', {}).get('name', 'unknown')}({tc.get('function', {}).get('arguments', '')})")
+                    content = f"[Agent Internal Tool Selection: {'; '.join(calls_text)}]"
+                
+                safe_history.append({
+                    "role": "assistant",
+                    "content": content
+                })
+            else:
+                safe_history.append(msg.copy())
+                
+        merged = []
+        for msg in safe_history:
+            if not merged:
+                merged.append(msg)
+            else:
+                last_msg = merged[-1]
+                if last_msg["role"] == msg["role"] and msg["role"] != "system":
+                    last_msg["content"] = str(last_msg.get("content", "")) + "\n\n" + str(msg.get("content", ""))
+                else:
+                    merged.append(msg)
+                    
+        return merged
+
     def chat_loop(self):
         while True:
             try:
@@ -1264,9 +1302,6 @@ Your are developed by rx76d."""
                     elif cmd == '/save':
                         self.save_history()
                         continue
-                    elif cmd == '/uninstall':
-                        uninstall_prisl_code()
-                        continue
                     elif cmd == '/help':
                         self.print_help()
                         continue
@@ -1288,7 +1323,7 @@ Your are developed by rx76d."""
                     try:
                         stream = self.client.chat.completions.create(
                             model=self.model_id,
-                            messages=self.history,
+                            messages=self.get_safe_history(),
                             max_tokens=16384,
                             temperature=0.2,
                             stream=True,
@@ -1306,15 +1341,6 @@ Your are developed by rx76d."""
                                     live.update(Markdown(response_content))
                                     
                                 if delta.tool_calls:
-                                    if not is_tool_streaming:
-                                        live.stop()
-                                        console.print("\n[dim cyan]Building code/tool payload [/dim cyan]", end="")
-                                        is_tool_streaming = True
-                                    
-                                    tool_stream_counter += 1
-                                    if tool_stream_counter % 8 == 0:
-                                        console.print("[dim cyan].[/dim cyan]", end="")
-
                                     for tc_chunk in delta.tool_calls:
                                         while len(tool_calls) <= tc_chunk.index:
                                             tool_calls.append({
@@ -1327,6 +1353,14 @@ Your are developed by rx76d."""
                                         if tc_chunk.id: tc["id"] += tc_chunk.id
                                         if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
                                         if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+
+                                display_text = response_content
+                                if tool_calls:
+                                    for tc in tool_calls:
+                                        t_name = tc["function"]["name"]
+                                        t_args = tc["function"]["arguments"]
+                                        display_text += f"\n\n> **Using tool: `{t_name}`**\n```json\n{t_args}\n```"
+                                live.update(Markdown(display_text))
                         finally:
                             if live.is_started:
                                 live.stop()
