@@ -23,7 +23,7 @@ dependencies = []
 Homepage = "https://github.com/rx76d/prisl-code"
 
 [project.scripts]
-prisl-code = "prisl_code.prislcode:main"
+prisl-code = "prisl_code._venv_bootstrap:cli_main"
 
 [tool.setuptools.packages.find]
 include = ["prisl_code*"]
