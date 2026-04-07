@@ -906,9 +906,12 @@ Your are developed by rx76d."""
         
         if name in ["list_files", "read_file", "search_files"]:
             with console.status(f"[cyan]Executing {name}...[/cyan]"):
-                if name == "list_files": result, _ = ToolExecutor.list_files(args)
-                elif name == "read_file": result, _ = ToolExecutor.read_file(args)
-                elif name == "search_files": result, _ = ToolExecutor.search_files(args)
+                if name == "list_files":
+                    result, _ = ToolExecutor.list_files(args)
+                elif name == "read_file":
+                    result, _ = ToolExecutor.read_file(args)
+                elif name == "search_files":
+                    result, _ = ToolExecutor.search_files(args)
             console.print(f"[dim]↳ Tool completed. ({len(result)} chars)[/dim]\n")
             return result
 
@@ -1043,8 +1046,6 @@ Your are developed by rx76d."""
                     
                     response_content = ""
                     tool_calls = []
-                    is_tool_streaming = False
-                    tool_stream_counter = 0
                     
                     try:
                         stream = self.client.chat.completions.create(
@@ -1076,9 +1077,12 @@ Your are developed by rx76d."""
                                             })
                                         
                                         tc = tool_calls[tc_chunk.index]
-                                        if tc_chunk.id: tc["id"] += tc_chunk.id
-                                        if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
-                                        if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                                        if tc_chunk.id:
+                                            tc["id"] += tc_chunk.id
+                                        if tc_chunk.function.name:
+                                            tc["function"]["name"] += tc_chunk.function.name
+                                        if tc_chunk.function.arguments:
+                                            tc["function"]["arguments"] += tc_chunk.function.arguments
 
                                 display_text = response_content
                                 if tool_calls:
@@ -1099,7 +1103,7 @@ Your are developed by rx76d."""
                     except Exception as e:
                         error_str = str(e)
                         if "500" in error_str or "JSON" in error_str or "parse" in error_str:
-                            console.print(f"\n[yellow]Tool syntax error detected. Instructing AI to self-correct...[/yellow]")
+                            console.print("\n[yellow]Tool syntax error detected. Instructing AI to self-correct...[/yellow]")
                             self.history.append({
                                 "role": "user", 
                                 "content": "Your last tool call failed with a JSON syntax error. Ensure your arguments are valid JSON and all strings/quotes are properly closed. Try again."
