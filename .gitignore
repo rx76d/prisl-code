@@ -4,3 +4,4 @@
 /tests
 /dist
 /venv
+.ruff_cache
