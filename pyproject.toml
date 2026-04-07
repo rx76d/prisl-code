@@ -4,26 +4,52 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prisl-code"
-version = "0.1.0"
-description = "Autonomous CLI powered by local LLMs"
+version = "1.0.0"
+description = "Autonomous CLI powered by local LLMs with self-healing tools"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
-  { name = "rx76d" }
+  { name = "rx76d"}
 ]
-license = { text = "MIT" }
+license = "MIT"
+keywords = ["llm", "cli", "agentic", "autonomous", "local-llm"]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent"
+  "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = [
+  "openai>=1.0.0",
+  "rich>=13.0.0",
+  "prompt-toolkit>=3.0.0",
+  "psutil>=5.9.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/rx76d/prisl-code"
+Repository = "https://github.com/rx76d/prisl-code.git"
+Issues = "https://github.com/rx76d/prisl-code/issues"
+Documentation = "https://github.com/rx76d/prisl-code/blob/main/README.md"
+Changelog = "https://github.com/rx76d/prisl-code/releases"
 
 [project.scripts]
-prisl-code = "prisl_code._venv_bootstrap:cli_main"
+prisl-code = "prisl_code.prislcode:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=7.0",
+  "build>=1.0",
+  "twine>=4.0",
+  "ruff>=0.1",
+]
 
 [tool.setuptools.packages.find]
 include = ["prisl_code*"]
+exclude = ["tests*", "docs*", "build*", "dist*"]

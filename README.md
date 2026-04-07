@@ -1,5 +1,5 @@
 # Prisl Code
-![Version](https://img.shields.io/badge/version-v0.1.0-blue)
+![Version](https://img.shields.io/badge/version-v1.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-windows%2C%20macos-default)
 
@@ -12,7 +12,7 @@ It can read, write, and execute code in your projects while running offline in a
 ## Installation
 Prisl Code is designed to be a one-command setup.
 ```bash
-pip install git+https://github.com/rx76d/prisl-code.git
+pip install prisl-code
 ```
 
 ## Usage
@@ -23,7 +23,7 @@ Once installed, navigate to any folder on your computer and start the assistant 
 prisl-code
 ```
 
-On its first run, it quietly sets up an isolated environment, installs dependencies (openai, rich, prompt_toolkit, psutil), checks for a local LLM server (ports 8080/11434), and if none is found, offers to auto-download llama-server and opens a native file picker to select a GGUF model.
+On its first run, Prisl Code checks for an active LLM server (ports 8080/11434). If none is found, it offers to automatically download `llama-server` and opens a native file picker for you to select your GGUF model.
 
 ## Basics
 **Add context:**
@@ -42,14 +42,12 @@ On its first run, it quietly sets up an isolated environment, installs dependenc
 ## Requirements
 - Python 3.8+
 - Pip 23.0+
-- Git
 
 ## Uninstall
 
 ```bash
-prisl-code --uninstall
+pip uninstall prisl-code
 ```
-> It will remove prisl-code completely, along with its isolated environments, cache and it PATH.
 
 ## License
 

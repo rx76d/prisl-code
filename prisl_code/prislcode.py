@@ -36,301 +36,27 @@ import tarfile
 import tempfile
 from typing import Dict, Any, Tuple, List, Optional
 
-
 def _is_windows() -> bool:
     return os.name == "nt" or sys.platform.startswith("win")
 
 
-def _windows_powershell_exe() -> Optional[str]:
-    if not _is_windows():
-        return None
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    bundled = os.path.join(
-        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
-    )
-    if os.path.isfile(bundled):
-        return bundled
-    for name in ("powershell.exe", "pwsh.exe"):
-        found = shutil.which(name)
-        if found and os.path.isfile(found):
-            return found
-    return None
+from openai import OpenAI
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.prompt import Confirm, Prompt
+from rich.live import Live
+from rich.text import Text
+from rich.table import Table
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
 
-def _schedule_remove_dir_deferred_windows_cmd(path: str) -> None:
-    inner = path.replace("%", "%%")
-    fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="prisl_rm_")
-    os.close(fd)
-    lines = (
-        "@echo off\r\n"
-        "ping 127.0.0.1 -n 3 >nul\r\n"
-        f'if exist "{inner}" rd /s /q "{inner}"\r\n'
-        'del "%~f0"\r\n'
-    )
-    with open(bat_path, "wb") as f:
-        f.write(lines.encode("utf-8"))
-    cmd_exe = os.path.join(
-        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"
-    )
-    if not os.path.isfile(cmd_exe):
-        cmd_exe = shutil.which("cmd.exe") or "cmd.exe"
-    creationflags = getattr(subprocess, "DETACHED_PROCESS", 8) | getattr(
-        subprocess, "CREATE_NO_WINDOW", 0x08000000
-    )
-    subprocess.Popen(
-        [cmd_exe, "/c", bat_path],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-        close_fds=True,
-    )
-
-
-# ==========================================
-# VIRTUAL ENVIRONMENT BOOTSTRAP
-# ==========================================
-
-# ==========================================
-# UNINSTALL LOGIC
-# ==========================================
-
-def _schedule_remove_dir_deferred(path: str) -> None:
-    path = os.path.normpath(os.path.abspath(path))
-    if _is_windows():
-        ps_path = path.replace("'", "''")
-        ps_cmd = (
-            f"Start-Sleep -Seconds 2; "
-            f"if (Test-Path -LiteralPath '{ps_path}') {{ "
-            f"Remove-Item -LiteralPath '{ps_path}' -Recurse -Force -ErrorAction SilentlyContinue }}"
-        )
-        creationflags = getattr(subprocess, "DETACHED_PROCESS", 8) | getattr(
-            subprocess, "CREATE_NO_WINDOW", 0x08000000
-        )
-        ps_exe = _windows_powershell_exe()
-        if ps_exe:
-            subprocess.Popen(
-                [
-                    ps_exe,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle", "Hidden",
-                    "-Command",
-                    ps_cmd,
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-                close_fds=True,
-            )
-        else:
-            _schedule_remove_dir_deferred_windows_cmd(path)
-    else:
-        sh_bin = "/bin/sh" if os.path.isfile("/bin/sh") else (shutil.which("sh") or "sh")
-        subprocess.Popen(
-            [sh_bin, "-c", f"sleep 2; rm -rf {shlex.quote(path)}"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-
-
-def _remove_prisl_user_home(prisl_dir: str, console) -> None:
-    if not os.path.exists(prisl_dir):
-        return
-    console.print(f"[dim]Removing environment: {prisl_dir}...[/dim]")
-    try:
-        shutil.rmtree(prisl_dir, ignore_errors=False)
-    except OSError:
-        shutil.rmtree(prisl_dir, ignore_errors=True)
-    if os.path.exists(prisl_dir):
-        _schedule_remove_dir_deferred(prisl_dir)
-        console.print(
-            "[yellow]The data folder is still in use. It will be deleted automatically a few seconds after you exit.[/yellow]"
-        )
-    else:
-        console.print("[green]Removed environment.[/green]")
-
-
-def uninstall_prisl_code():
-    """Completely removes the Prisl Code environment, binaries, and cache."""
-    from rich.prompt import Confirm
-    from rich.panel import Panel
-    from rich.console import Console
-    
-    console = Console()
-    
-    console.print(Panel.fit(
-        "[bold red]UNINSTALL PRISL CODE[/bold red]\n"
-        "This will permanently delete the virtual environment, LLM binaries, and cache.",
-        border_style="red"
-    ))
-    
-    if not Confirm.ask("[bold yellow]Are you absolutely sure you want to proceed?[/bold yellow]", default=False):
-        console.print("[green]Uninstall cancelled.[/green]")
-        return
-
-    home_dir = os.path.expanduser("~")
-    prisl_dir = os.path.join(home_dir, ".prisl_code")
-    _remove_prisl_user_home(prisl_dir, console)
-
-    llama_bin = os.path.join(os.getcwd(), "llama_bin")
-    if os.path.exists(llama_bin):
-        console.print(f"[dim]Removing binaries: {llama_bin}...[/dim]")
-        try:
-            shutil.rmtree(llama_bin, ignore_errors=True)
-            console.print("[green]Removed local binaries.[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to remove binaries: {e}[/red]")
-
-    console.print("[dim]Cleaning up Prisl Code cache and build files...[/dim]")
-    package_dir = os.path.dirname(os.path.abspath(__file__))
-    count = 0
-    for root, dirs, files in os.walk(package_dir):
-        for d in list(dirs):
-            if d == "__pycache__" or d.endswith(".egg-info") or d == ".pytest_cache" or d == ".build" or d == "dist":
-                target = os.path.join(root, d)
-                try:
-                    shutil.rmtree(target, ignore_errors=True)
-                    count += 1
-                except: pass
-    console.print(f"[green]Removed {count} internal cache/build directories.[/green]")
-
-    console.print("[dim]Attempting to uninstall package via pip...[/dim]")
-    try:
-        subprocess.run([sys.executable, "-m", "pip", "uninstall", "prisl-code", "-y"], capture_output=True)
-        console.print("[green]Uninstalled package from current environment.[/green]")
-    except Exception as e:
-        console.print(f"[yellow]Could not uninstall via pip: {e}[/yellow]")
-
-    console.print("\n[bold green]Prisl Code has been uninstalled successfully.[/bold green]")
-    sys.exit(0)
-
-def bootstrap_venv():
-    """Ensures the script runs inside an isolated virtual environment with all dependencies."""
-    home_dir = os.path.expanduser("~")
-    venv_dir = os.path.join(home_dir, ".prisl_code", "env")
-    
-    if _is_windows():
-        venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
-    else:
-        venv_python = os.path.join(venv_dir, "bin", "python")
-        if not os.path.exists(venv_python):
-            v3 = os.path.join(venv_dir, "bin", "python3")
-            if os.path.exists(v3):
-                venv_python = v3
-
-    if os.path.normcase(sys.executable) == os.path.normcase(venv_python):
-        return
-
-    print("\n[PRISL-CODE] Checking isolated environment...")
-    
-    if not os.path.exists(venv_python):
-        print("\n[PRISL-CODE] First run detected. Creating an isolated environment...")
-        
-        if os.path.exists(venv_dir):
-            shutil.rmtree(venv_dir, ignore_errors=True)
-            
-        os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
-            
-        try:
-            venv.create(venv_dir, with_pip=True)
-            
-            print("[PRISL-CODE] Installing required dependencies...")
-            deps = ["openai", "rich", "prompt_toolkit", "psutil"]
-            
-            subprocess.run(
-                [venv_python, "-m", "pip", "install", "--upgrade", "pip", "-q"],
-                capture_output=True,
-            )
-
-            result = subprocess.run(
-                [venv_python, "-m", "pip", "install"] + deps,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-
-            if result.returncode != 0:
-                print("\n[PRISL-CODE] ERROR: Failed to install one or more dependencies.")
-                if result.stderr:
-                    print(f"[PRISL-CODE] pip output:\n{result.stderr[-2000:]}")
-                if not shutil.which("git"):
-                    print("[PRISL-CODE] HINT: 'git' was NOT found on your system.")
-                    print("[PRISL-CODE]       Some pip packages require git to install.")
-                    print("[PRISL-CODE]       Install it from https://git-scm.com and re-run prisl-code.")
-                shutil.rmtree(venv_dir, ignore_errors=True)
-                sys.exit(1)
-                
-            print("[PRISL-CODE] Dependencies installed successfully.")
-            
-        except BaseException as e:
-            print(f"\n[PRISL-CODE] Process interrupted or failed ({type(e).__name__}). Cleaning up corrupted environment...")
-            shutil.rmtree(venv_dir, ignore_errors=True)
-            sys.exit(1)
-
-    print("[PRISL-CODE] Relaunching inside virtual environment...\n")
-
-    script_path = os.path.abspath(__file__)
-    try:
-        sys.exit(subprocess.call([venv_python, script_path] + sys.argv[1:]))
-    except KeyboardInterrupt:
-        print("\n[PRISL-CODE] Relaunch interrupted by user.")
-        sys.exit(1)
-
-
-def _exit_startup_interrupt():
-    print("\n[PRISL-CODE] Startup interrupted by user.")
-    sys.exit(1)
-
-
-try:
-    from openai import OpenAI
-except ImportError:
-    print("ERROR: The 'openai' library is missing.")
-    print("Please run: pip install openai")
-    sys.exit(1)
-except KeyboardInterrupt:
-    _exit_startup_interrupt()
-
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.syntax import Syntax
-    from rich.prompt import Confirm, Prompt
-    from rich.live import Live
-    from rich.text import Text
-    from rich.table import Table
-except ImportError:
-    print("ERROR: The 'rich' library is missing.")
-    print("Please run: pip install rich")
-    sys.exit(1)
-except KeyboardInterrupt:
-    _exit_startup_interrupt()
-
-try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import Completer, Completion, PathCompleter
-    from prompt_toolkit.document import Document
-    from prompt_toolkit.formatted_text import HTML
-    from prompt_toolkit.styles import Style
-except ImportError:
-    print("ERROR: The 'prompt_toolkit' library is missing.")
-    print("Please run: pip install prompt_toolkit")
-    sys.exit(1)
-except KeyboardInterrupt:
-    _exit_startup_interrupt()
-
-try:
-    import psutil
-except ImportError:
-    print("ERROR: The 'psutil' library is missing.")
-    print("Please run: pip install psutil")
-    sys.exit(1)
-except KeyboardInterrupt:
-    _exit_startup_interrupt()
+import psutil
 
 # ==========================================
 # CONFIGURATION & INITIALIZATION
@@ -1082,7 +808,7 @@ Your are developed by rx76d."""
         table.add_row("/help", "Show this help menu.")
         table.add_row("/exit", "Exit the application.")
         console.print(table)
-        console.print("\n[dim]Note: You can also run 'prisl-code --uninstall' from your terminal.[/dim]")
+        console.print("\n[dim]Note: You can also use 'pip uninstall prisl-code' to remove the application.[/dim]")
 
     def print_history(self):
         if len(self.history) <= 1:
@@ -1416,11 +1142,6 @@ Your are developed by rx76d."""
 # ==========================================
 
 def main():
-    if "--uninstall" in sys.argv:
-        uninstall_prisl_code()
-
-    bootstrap_venv()
-
     try:
         os.system('cls' if os.name == 'nt' else 'clear')
         console.print(Panel.fit(
