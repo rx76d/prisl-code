@@ -2,3 +2,5 @@
 /prisl_code/__pycache__
 /prisl_code.egg-info
 /tests
+/dist
+/venv
