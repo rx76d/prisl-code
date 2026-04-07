@@ -1,8 +1,8 @@
 # Prisl Code
 ![Version](https://img.shields.io/badge/version-v1.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Platform](https://img.shields.io/badge/platform-windows%2C%20macos-default)
-
+![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-default)
+![Downloads](https://img.shields.io/pypi/dm/prisl-code)
 
 
 A local AI coding assistant for your terminal that runs GGUF models using llama.cpp locally.
