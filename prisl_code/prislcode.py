@@ -21,7 +21,6 @@ import os
 import sys
 import subprocess
 import platform
-import venv
 import json
 import difflib
 import fnmatch
@@ -29,16 +28,10 @@ import re
 import datetime
 import urllib.request
 import shutil
-import shlex
 import time
 import zipfile
 import tarfile
-import tempfile
 from typing import Dict, Any, Tuple, List, Optional
-
-def _is_windows() -> bool:
-    return os.name == "nt" or sys.platform.startswith("win")
-
 
 from openai import OpenAI
 from rich.console import Console
@@ -57,6 +50,11 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style
 
 import psutil
+
+
+def _is_windows() -> bool:
+    return os.name == "nt" or sys.platform.startswith("win")
+
 
 # ==========================================
 # CONFIGURATION & INITIALIZATION
@@ -203,7 +201,7 @@ class LocalServerManager:
             avail_ram_gb = available_ram_bytes / (1024**3)
             
             if required_ram_bytes > available_ram_bytes:
-                console.print(f"\n[bold red]❌ INSUFFICIENT RAM DETECTED[/bold red]")
+                console.print("\n[bold red]❌ INSUFFICIENT RAM DETECTED[/bold red]")
                 console.print(f"[red]Model file size: {file_size_gb:.2f} GB[/red]")
                 console.print(f"[red]Estimated RAM required (with context): {req_ram_gb:.2f} GB[/red]")
                 console.print(f"[bold red]Your available free RAM: {avail_ram_gb:.2f} GB[/bold red]")
@@ -421,7 +419,7 @@ class LocalServerManager:
             sys.exit(1)
 
         try:
-            console.print(f"[cyan]Spinning up llama-server on port 8080...[/cyan]")
+            console.print("[cyan]Spinning up llama-server on port 8080...[/cyan]")
             cmd = [server_path, "-m", gguf_path, "-c", "8192", "--port", "8080"]
             
             if _is_windows():
@@ -666,10 +664,12 @@ class ToolExecutor:
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     old_content = f.read()
-            except Exception: pass
-            
+            except (OSError, IOError, UnicodeDecodeError):
+                pass
+        
         diff = ToolExecutor._generate_diff(old_content, content, filepath)
-        if not diff: diff = "(No changes or new file creation)"
+        if not diff:
+            diff = "(No changes or new file creation)"
         
         return {"action": "write", "filepath": filepath, "content": content, "diff": diff}
 
@@ -855,9 +855,9 @@ Your are developed by rx76d."""
                     if role == "user":
                         f.write(f"### You\n{content}\n\n")
                     elif role == "assistant":
-                        f.write(f"### Agent\n")
+                        f.write("### Agent\n")
                         if msg.get("tool_calls"):
-                            f.write(f"*(Agent requested tools)*\n")
+                            f.write("*(Agent requested tools)*\n")
                         f.write(f"{content}\n\n")
                     elif role == "tool":
                         f.write(f"**[Tool Result]**\n```text\n{content}\n```\n\n")

@@ -1,0 +1,26 @@
+# Ruff configuration
+# ------------------
+# This file defines the linting rules for Prisl Code.
+
+# Exclude common patterns
+exclude = [
+    ".git",
+    ".github",
+    "__pycache__",
+    "dist",
+    "venv",
+]
+
+line-length = 120
+
+[lint]
+# Select default rules (E, F)
+select = ["E", "F"]
+
+# Ignore non-blocking formatting issues
+ignore = [
+    "E501",
+]
+
+# Allow unused variables if they start with an underscore
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
